@@ -1,20 +1,14 @@
-//#include "stdint.h"
 #include <iostream>
-#include <list>
 #include <string>
 #include <sstream>
-#include <thread>
+#include <mutex>
 //количество блоков памяти
 #define MEM_BLOCKS_COUNT 10 
 //размер блоков памяти
-#define MEM_BLOCKS_SIZE 32 
-//объявление начала и конца статического пула памяти
-#define START_MEM 0x00007FF74ECCD170
-#define END_MEM 0x00007FF74ECCDB70
-//определение разрядности для типа данных хранения адресов
+#define MEM_BLOCKS_SIZE 50
+//тип данных для хранение адресов в системе (зависит от разрядности системы)
 #define capacity uint64_t 
 
-//для вывода чисел в поток как текст
 template <typename T>
 std::string toString(T val)
 {
@@ -23,80 +17,76 @@ std::string toString(T val)
 	return oss.str();
 }
 
-class BLOCK
-{
-public:
-	//начальный адресс блока
-	std::capacity* start_mem;
-	//смещение в блоке
-	capacity offset;
-};
 //Линейный аллокатор памяти
 class Linear_allocate
 {
 public:
-	//массив заранее известного кол-ва блоков памяти
-	BLOCK buf_allocat[MEM_BLOCKS_COUNT];
-	//создание блока памяти исходя из начального адреса и размера
-	bool User_mem_create(BLOCK* block, capacity* start)
+	uint8_t* static_pool;
+private:
+	capacity* freeblocks[MEM_BLOCKS_COUNT];
+	uint8_t free_blocks_index;
+	std::mutex _mutex;
+public:
+	Linear_allocate()
 	{
-		if ((block != NULL) && ((capacity)start >= START_MEM) && ((capacity)start < END_MEM))
-		{
-			if (check_block(block))
-			{
-				block->start_mem = start;
-				block->offset = 0;
-				return true;
-			}
-		}
-		return false;
-	}
-	//определения свободной памяти для известного размера байт в выбранном блоке
-	capacity* User_mem_allocate(BLOCK* block, capacity size)
-	{
-		if ((block != NULL) && (size != NULL) && (size + block->offset <= MEM_BLOCKS_SIZE))
-		{
-			if (check_block(block))
-			{
-				//адрес начальной ячейки памяти доступной для записи в рамках данного блока, передаваемый пользователю
-				capacity* p;
-				p = block->start_mem + block->offset + size;
-				block->offset += size;
-				return p;
-			}
-		}
-		return 0;
+		static_pool = new uint8_t[MEM_BLOCKS_COUNT * MEM_BLOCKS_SIZE];
 
+		for (int i = 0; i < MEM_BLOCKS_COUNT;i++)
+		{
+			freeblocks[i] = (capacity*)((static_pool) + i * MEM_BLOCKS_SIZE);
+		}
+		free_blocks_index = MEM_BLOCKS_COUNT;
+	}
+	~Linear_allocate() 
+	{
+		delete[] static_pool;
+	}
+
+	capacity* allocate()
+	{
+		capacity* out_ptr;
+		lock_mutex();
+		if (free_blocks_index == 0)
+			out_ptr = nullptr;
+		else
+			 out_ptr = freeblocks[--free_blocks_index];
+		unlock_mutex();
+		return out_ptr;
 	}
 	//сброс блока
-	bool User_mem_deallocate(BLOCK* block)
+	void deallocate(capacity* ptr)
 	{
-		//проверка передачи в метод ненулевого указателя на блок
-		if (block != NULL)
-		{
-			//проверка переданного блока на наличие в заранее созданном массиве блоков 
-			if (check_block(block))
-			{
-				block->offset = 0;
-				return true;
-			}
-		}
-		else
-			return false;
+		lock_mutex();
+		if (check_block(ptr))
+			freeblocks[free_blocks_index++] = ptr;
+		unlock_mutex();
 	}
+	
 private:
-	//проверка переданного блока на наличие в заранее созданном массиве блоков 
-	bool check_block(BLOCK* block)
+	//проверка адреса блока переданного для освобождение на возможность существования данного адреса в статическом пуле
+	//проверка на наличие среди уже освобожденных блоков
+	bool check_block(capacity* ptr)
 	{
 		for (int i = 0; i < MEM_BLOCKS_COUNT; i++)
 		{
-			if (block == &(this->buf_allocat[i]))
+			if (ptr == (capacity*)(static_pool + i * MEM_BLOCKS_SIZE))
 			{
+				for (int j = 0; j < free_blocks_index; j++)
+					if (freeblocks[j] == ptr)
+						return false;
 				return true;
-				break;
 			}
 		}
 		return false;
+	}
+	//в зависимости от системы описание захвата и освобождения мьютекса
+	void lock_mutex()
+	{
+		std::lock_guard<std::mutex> lock(_mutex);
+	}
+	void unlock_mutex()
+	{
+		std::lock_guard<std::mutex> unlock(_mutex);
 	}
 };
 
@@ -105,90 +95,68 @@ private:
 class Tester
 {
 public:
-	//Проверка создания блоков в заранее определенном адресном пространстве
+	//Проверка создания указанного кол-ва блоков
 	void check_create_block(Linear_allocate* allocate)
 	{
-		capacity* start;
-		printf("\n");
+		printf("\nПроверка создания указанного кол-ва блоков:" + toString(MEM_BLOCKS_COUNT) + "\n");
 		for (int i = 0; i < MEM_BLOCKS_COUNT; i++)
 		{
-			start = (capacity*)(START_MEM + MEM_BLOCKS_SIZE * i);
-			if ((allocate->User_mem_create(&(allocate->buf_allocat[i]), start)))
-				printf("Проверка создания блока по адресу: " + toString(start) + " Успешна\n");
+			capacity* p = allocate->allocate();
+			if ((p != nullptr))
+				printf("\tПроверка создания блока №:" + toString(i) + " по адресу : " + toString(p) + " Успешна\n");
 			else
-				printf("Проверка создания блока по адресу: " + toString(start) + " Провалена\n");
+				printf("\tПроверка создания блока №:" + toString(i) + " по адресу : " + toString(p) + " Провалена\n");
 		}
-
-		start = (capacity*)(START_MEM - 1);
-		printf("\n");
-		for (int i = 0; i < MEM_BLOCKS_COUNT; i++)
-		{
-			//start = (capacity*)(START_MEM + MEM_BLOCKS_SIZE * i);
-			if (!(allocate->User_mem_create(&(allocate->buf_allocat[i]), start)))
-				printf("Проверка создания блока по адресу меньше стартового: " + toString(start) + " В блоке: " + toString(i) + " Успешна\n");
-			else
-				printf("Проверка создания блока по адресу меньше стартового: " + toString(start) + " В блоке: " + toString(i) + " Провалена\n");
-		}
-
-		start = (capacity*)(END_MEM + 1);
-		printf("\n");
-		for (int i = 0; i < MEM_BLOCKS_COUNT; i++)
-		{
-			//start = (capacity*)(START_MEM + MEM_BLOCKS_SIZE * i);
-			if (!(allocate->User_mem_create(&(allocate->buf_allocat[i]), start)))
-				printf("Проверка создания блока по адресу больше стартового: " + toString(start) + " В блоке: " + toString(i) + " Успешна\n");
-			else
-				printf("Проверка создания блока по адресу больше стартового: " + toString(start) + " В блоке: " + toString(i) + " Провалена\n");
-		}
-	};
-	//проверка выделения памяти (с учетом выделения памяти больше чем определено для блока)
-	void check_allocate(Linear_allocate* allocate)
+		deallocate_all(allocate);
+	}
+	//Проверка создания большего кол-ва блоков
+	void check_create_over_block(Linear_allocate* allocate)
 	{
-		capacity* p;
-		printf("\n");
-		bool flag;
-		for (int j = 0; j < MEM_BLOCKS_COUNT; j++)
+		printf("\nПроверка создания большего кол-ва блоков:" + toString(MEM_BLOCKS_COUNT+1) + "\n");
+		for (int i = 0; i <= MEM_BLOCKS_COUNT; i++)
 		{
-			flag = true;
-			for (int step = 1; step < MEM_BLOCKS_SIZE + 1; step++)
-			{
-				allocate->User_mem_deallocate(&(allocate->buf_allocat[j]));
-				for (int i = 0; i < MEM_BLOCKS_SIZE / step; i++)
-				{
-					p = allocate->User_mem_allocate(&(allocate->buf_allocat[j]), step);
-					if (p != (allocate->buf_allocat[j].start_mem + (i + 1) * step))
-					{
-						if ((step >= MEM_BLOCKS_SIZE) && (p != 0))
-						{
-							flag = false;
-							//printf("Возвращено: " + toString(p) + " Должно быть:" + toString((allocate->buf_allocat[j].start_mem + (i + 1) * step)) + "\n");
-						}
-					}
-
-				}
-				if (flag)
-					printf("Проверка выделения памяти в блоке: " + toString(j) + " С шагом: " + toString(step) + " байт" + " Успешна\n");
-				else
-				{
-					printf("Проверка выделения памяти в блоке: " + toString(j) + " С шагом: " + toString(step) + " байт" + " Провалена\n");
-
-				}
-			}
+			capacity* p = allocate->allocate();
+			if (((p != nullptr) && (i < MEM_BLOCKS_COUNT)) || ((p == nullptr) && (i == MEM_BLOCKS_COUNT)))
+				printf("\tПроверка создания блока №:" + toString(i) + " по адресу : " + toString(p) + " Успешна\n");
+			else
+				printf("\tПроверка создания блока №:" + toString(i) + " по адресу : " + toString(p) + " Провалена\n");
 		}
-	};
-	//проверка освобождения памяти
+		deallocate_all(allocate);
+	}
+	//Проверка деаллокации блоков
 	void check_deallocate(Linear_allocate* allocate)
 	{
-		printf("\n");
-		for (int j = 0; j < MEM_BLOCKS_COUNT; j++)
+		printf("\nПроверка создания и очистки блоков\n");
+		for (int i = 0; i < MEM_BLOCKS_COUNT; i++)
 		{
-			if (allocate->User_mem_deallocate(&(allocate->buf_allocat[j])) && (allocate->buf_allocat[j].offset == 0))
-				printf("Проверка освобождения памяти в блоке: " + toString(j) + " Успешна\n");
-			else
-				printf("Проверка освобождения памяти в блоке: " + toString(j) + " Провалена\n");
-		}
-	};
+			capacity* p = allocate->allocate();
+			//if ((p != nullptr))
+			//	printf("\tБлок №:" + toString(i) + " по адресу : " + toString(p) + " Создан\n");
+			//else
+			//	printf("\tБлок №:" + toString(i) + " по адресу : " + toString(p) + " Не создан\n");
 
+			allocate->deallocate(p);
+			//printf("\tБлок №:" + toString(i) + " по адресу : " + toString(p) + " Очищен\n");
+
+			capacity* temp_p = allocate->allocate();
+			if ((p == temp_p))
+				printf("\tПроверка деаллокации блока:" + toString(i) + " по адресу : " + toString(p) + " Успешна\n");
+			else
+				printf("\tПроверка деаллокации блока:" + toString(i) + " по адресу : " + toString(p) + " Провалена\n");
+		}
+		deallocate_all(allocate);	
+	}
+
+private:
+	//функция освобождение всех блоков - используется для последовательной проверки unit-тестами
+	void deallocate_all(Linear_allocate* allocate)
+	{
+		for (int i = 0; i < MEM_BLOCKS_COUNT; i++)
+		{
+			allocate->deallocate((capacity*)(allocate->static_pool + i * MEM_BLOCKS_SIZE));
+		}
+	}
+		
 	//функция вывода , может быть изменена в зависимости от используемых мониторов вывода
 	void printf(std::string str)
 	{
